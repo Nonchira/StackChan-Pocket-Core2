@@ -1,0 +1,24 @@
+# Generated files / local settings
+**/.gradle/
+**/.kotlin/
+**/build/
+**/.pio/
+**/.idea/
+**/.dev-signing/
+**/local.properties
+**/config_private.h
+*.keystore
+*.jks
+*.apk
+*.aab
+*.elf
+*.bin
+*.log
+# Models and user data
+*.litertlm
+*.gguf
+*.onnx
+*.wav
+*.pcm
+.env
+.env.*

@@ -1,0 +1,12 @@
+# ソースをビルドする方へ
+
+AndroidはAndroid StudioでAndroid_Sourceを開き、JDK 17とAndroid SDK 35を用意して同期します。SDKの位置は各自の環境で設定してください。Gradle Wrapperを同梱しています。コマンドならそのフォルダで`gradlew.bat :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`を実行します。
+
+配布者の署名鍵・local.properties・キャッシュ・開発ログは同梱しません。ソースのdebug署名は各自の標準debug鍵を使用します。そのため自分のビルドは同梱APKへ上書き更新できない場合があります。既存アプリを削除する前に、モデル原本と必要な設定を控えてください。
+
+Core2はCore2_Sourceのplatformio.iniを使用します。固定のupload_portは指定せず、接続先に合わせます。本パッケージはソース書き込み方式で、開発PCの絶対パスを含み得るELFやビルド生成物を含めません。
+
+第三者のライセンス・著作権表示は個人情報の削除対象とせず維持しています。Android_Source/THIRD_PARTY.mdと各LICENSEを参照してください。
+
+
+APKはdebug署名版であり、一般向けストア配布用のrelease署名・ストア審査は別工程です。
