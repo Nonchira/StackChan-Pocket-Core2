@@ -22,3 +22,6 @@
 *.pcm
 .env
 .env.*
+
+**/.cxx/
+**/vendor/

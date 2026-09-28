@@ -8,7 +8,6 @@ import android.net.*
 import android.net.wifi.WifiManager
 import android.os.*
 import android.speech.tts.*
-import com.google.ai.edge.litertlm.*
 import com.k2fsa.sherpa.onnx.*
 import okhttp3.*
 import okio.ByteString
@@ -40,6 +39,31 @@ class RobotService : Service() {
     private val audioEpoch=AtomicLong()
     private val captureLock=Any()
     private val modelLock=Any()
+    private val asrLock=Any()
+    private val modelOwner=Any()
+    @Volatile private var releaseRequested=false
+    @Volatile private var modelLoading=false
+    private fun requestRelease() {
+        synchronized(captureLock) {
+            releaseRequested=true
+            ready=false
+            ModelRuntime.update(modelOwner,ModelState("releasing","処理終了後に解放します"))
+        }
+        cancel(true)
+    }
+    // Called only by the LLM worker, after its current generation has joined.
+    private fun releaseModels(error:String?=null)=synchronized(modelLock) {
+        if(!ModelRuntime.owns(modelOwner)) { releaseRequested=false;return@synchronized }
+        ready=false
+        cachedValid=false
+        cachedConversation?.close();cachedConversation=null;conversation=null
+        engine?.close();engine=null
+        synchronized(captureLock) { vad?.release();vad=null }
+        synchronized(asrLock) { asr?.release();asr=null }
+        memory.clear();activeBackend="未読み込み"
+        ModelRuntime.release(modelOwner,error)
+        releaseRequested=false
+    }
     private val speechInbox=SpeechInbox()
     private data class Recognition(val generation:Long,val samples:FloatArray,val single:Boolean,val registration:Boolean,val heardAt:Long)
     private val recognitionJobs=ArrayBlockingQueue<Recognition>(2)
@@ -78,10 +102,10 @@ class RobotService : Service() {
     private var tts:TextToSpeech?=null
     private var vad:Vad?=null
     private var asr:OfflineRecognizer?=null
-    private var engine:Engine?=null
+    private var engine:LocalLlm?=null
     private val memory=ConversationMemory()
-    @Volatile private var conversation:Conversation?=null
-    private var cachedConversation:Conversation?=null
+    @Volatile private var conversation:LocalSession?=null
+    private var cachedConversation:LocalSession?=null
     @Volatile private var cachedValid=false
     private var cachedHistory:List<ConversationMemory.Turn> = emptyList()
     private var cachedMode=-1
@@ -213,6 +237,7 @@ class RobotService : Service() {
         Thread({
             try {
                 while(alive) {
+                    if(releaseRequested) { releaseModels();report("モデルを解放しました（接続維持）") }
                     val taskEpoch=epoch.get()
                     val command=work.poll()
                     try {
@@ -230,7 +255,7 @@ class RobotService : Service() {
                         }
                     }
                 }
-            } finally { cachedConversation?.close(); cachedConversation=null; conversation=null; engine?.close() }
+            } finally { releaseModels() }
         },"local-ai").start()
         Thread({
             try {
@@ -245,7 +270,7 @@ class RobotService : Service() {
                         }
                     }
                 }
-            } finally { synchronized(modelLock) { vad?.release();vad=null } }
+            } finally { /* Models are released by the LLM worker under captureLock/asrLock. */ }
         },"local-vad").start()
         Thread({
             try {
@@ -261,7 +286,7 @@ class RobotService : Service() {
                         }
                     }
                 }
-            } finally { synchronized(modelLock) { asr?.release();asr=null } }
+            } finally { /* See releaseModels. */ }
         },"local-asr").start()
     }
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
@@ -274,11 +299,12 @@ class RobotService : Service() {
                 else volumeStatus="Core2に接続してから調整してください"
             }
             "shutdown" -> stopSelf()
-            "stop" -> cancel(true)
+            "stop" -> if(modelLoading)requestRelease() else cancel(true)
             "forget" -> { cancel(true); enqueue { memory.clear();report("会話の記憶をリセットしました。会話開始で再開できます") } }
             "connect" -> connect()
             "disconnect" -> { cancel(true);linkEpoch.incrementAndGet();transport?.close();transport=null;connected=false;core2Volume=-1;report("通信方式を変更しました。接続してください") }
-            "load" -> enqueue { loadModels() }
+            "load" -> if(ModelRuntime.available() && !releaseRequested) enqueue { loadModels() } else report("モデルの使用・取り込み・解放中です")
+            "unload" -> requestRelease()
             "listen" -> { cancel(true);val turn=epoch.get();enqueue { checkTurn(turn);send("compat.click");beginListening(settings.getString("talk_mode","once")!="continuous") } }
             "tts" -> enqueue { turn -> say("こんにちは。スタックチャンです。",turn) }
             "news" -> { cancel(true);val turn=epoch.get();enqueue { report("ニュースを取得中…");say(news.speech(),turn) } }
@@ -393,31 +419,52 @@ class RobotService : Service() {
                     finally { if(turn==epoch.get() || listening)touchStartPending=false }
                 }
             }
-            "stop" -> cancel(true)
+            "stop" -> if(modelLoading)requestRelease() else cancel(true)
             "forget" -> { cancel(true); enqueue { memory.clear();report("会話の記憶をリセットしました。会話開始で再開できます") } }
             "mic" -> { settings.edit().putString("mic",j.optString("mic","core2")).apply(); cancel(false); startPhoneMic(); sync() }
             "battery" -> { val n=j.optInt("percent",-1); val turn=epoch.get(); enqueue { say(if(n in 0..100) "バッテリー残量は${n}パーセントです。" else "バッテリー残量を取得できません。",turn) } }
         }
     }
     private fun loadModels()=synchronized(modelLock) {
-        check(!ready) { "モデルを交換する場合はアプリの終了ボタンを押してください" }
-        report("端末内モデルを読み込み中…")
-        fun model(name:String):String=File(filesDir,name).also { check(it.isFile && it.length()>0) { "$name を取り込んでください" } }.path
-        // Resolve all files before allocating any native models.
-        val a=model("sensevoice.onnx"); val tokens=model("tokens.txt"); val v=model("silero_vad.onnx"); val llm=model("model.litertlm")
-        try {
-            asr=OfflineRecognizer(config=OfflineRecognizerConfig(modelConfig=OfflineModelConfig(
-                senseVoice=OfflineSenseVoiceModelConfig(model=a,language="ja"),tokens=tokens,numThreads=2)))
-            vad=Vad(config=VadModelConfig(sileroVadModelConfig=SileroVadModelConfig(model=v,minSilenceDuration=settings.getFloat("vad_silence",1f).coerceIn(.65f,1.5f),maxSpeechDuration=15f)))
-            val gpu=settings.getString("llm_backend","cpu")=="gpu"
-            val candidate=Engine(EngineConfig(modelPath=llm,backend=if(gpu) Backend.GPU() else Backend.CPU(),maxNumTokens=4096,cacheDir=cacheDir.path))
-            engine=candidate
-            try { candidate.initialize() } catch(e:Exception) {
-                throw IllegalStateException(if(gpu) "GPUで読み込めません。設定をCPUに戻して再度モデルを読み込んでください。" else "CPUモデルの読み込みに失敗しました",e)
+        check(!ready && ModelRuntime.beginLoad(modelOwner)) { "先にモデルを解放し、取り込み完了を待ってください" }
+        modelLoading=true
+        val turn=epoch.get()
+        fun ensureLoading() { checkTurn(turn);if(releaseRequested)throw CancellationException("読み込み中止") }
+        fun stage(text:String,percent:Int?=null) {
+            synchronized(captureLock) {
+                ensureLoading();ModelRuntime.update(modelOwner,ModelState("loading",text,percent=percent));report(text.substringBefore("（"))
             }
-            activeBackend=if(gpu) "GPU" else "CPU"
-            check(alive) { "終了しました" };ready=true; report("モデル準備完了（$activeBackend）。会話開始を押してください")
-        } catch(e:Exception) { asr?.release(); asr=null; vad?.release(); vad=null; engine?.close(); engine=null; throw e }
+        }
+        fun model(name:String):String=File(filesDir,name).also { check(it.isFile && it.length()>0) { "$name を取り込んでください" } }.path
+        try {
+            val gguf=settings.getString("llm_engine","litert")=="gguf"
+            val gpu=settings.getString(if(gguf)"gguf_backend" else "llm_backend","cpu")=="gpu"
+            val a=model("sensevoice.onnx");val tokens=model("tokens.txt");val v=model("silero_vad.onnx")
+            val llm=model(if(gguf)"model.gguf" else "model.litertlm")
+            stage("音声認識を読み込み中")
+            synchronized(asrLock) { asr=OfflineRecognizer(config=OfflineRecognizerConfig(modelConfig=OfflineModelConfig(
+                senseVoice=OfflineSenseVoiceModelConfig(model=a,language="ja"),tokens=tokens,numThreads=2))) }
+            stage("VADを読み込み中")
+            synchronized(captureLock) { vad=Vad(config=VadModelConfig(sileroVadModelConfig=SileroVadModelConfig(model=v,minSilenceDuration=settings.getFloat("vad_silence",1f).coerceIn(.65f,1.5f),maxSpeechDuration=15f))) }
+            stage(if(gguf)"GGUFファイルをロード中" else "LiteRT-LMを読み込み中")
+            engine=if(gguf)GgufLlm(llm,settings.getInt("gguf_threads",4),applicationInfo.nativeLibraryDir,gpu,
+                settings.getBoolean("gguf_reuse",true),onLoad={ progress ->
+                    if(progress>=0)stage("GGUFファイルをロード中（RAM全体の割合ではありません）",(progress*100).toInt().coerceIn(0,100))
+                    else stage("GGUFコンテキストを確保中")
+                },cancelLoad={releaseRequested || !alive || turn!=epoch.get()})
+                else LiteRtLlm(llm,gpu,cacheDir.path)
+            synchronized(captureLock) {
+            ensureLoading()
+            activeBackend=if(gguf) "GGUF / ${if(gpu)"Vulkan GPU" else "CPU"}" else "LiteRT-LM / ${if(gpu)"GPU" else "CPU"}"
+            ready=true
+            ModelRuntime.update(modelOwner,ModelState("ready","使用中：${settings.getString("model_name_${if(gguf) "model.gguf" else "model.litertlm"}",if(gguf) "model.gguf" else "model.litertlm")}",activeBackend))
+            report("モデル準備完了（$activeBackend）。会話開始を押してください")
+            }
+        } catch(e:Exception) {
+            val message=TaskFailure.message(e,releaseRequested || !alive || turn!=epoch.get())
+            releaseModels(message)
+            if(message!=null)throw e else report("読み込みを中止し解放しました")
+        } finally { modelLoading=false }
     }
     private fun process(frame:Frame) {
         var single=false
@@ -462,12 +509,15 @@ class RobotService : Service() {
     private fun recognize(job:Recognition) {
         checkTurn(job.generation)
         val asrStarted=SystemClock.elapsedRealtime()
+        val text=synchronized(asrLock) {
+        checkTurn(job.generation)
         val recognizer=asr ?: error("音声認識モデルが未準備です")
         val stream=recognizer.createStream()
-        val text=try {
+        try {
             stream.acceptWaveform(job.samples,16000);recognizer.decode(stream)
             recognizer.getResult(stream).text.replace(Regex("<\\|.*?\\|>"),"").trim()
         } finally { stream.release() }
+        }
         checkTurn(job.generation)
         asrTiming="直近の音声認識：${SystemClock.elapsedRealtime()-asrStarted}ms / 入力音声${job.samples.size*1000L/16000}ms（VADの無音待ち・順番待ちを除く）"
         synchronized(captureLock) {
@@ -524,16 +574,16 @@ class RobotService : Service() {
             } else {
                 val e=engine ?: error("先にモデルを読み込んでください")
                 // Recreate native context with bounded, role-separated completed turns.
-                val previous=memory.snapshot().flatMap { listOf(Message.user(it.user),Message.model(it.assistant)) }
+                val previous=memory.snapshot()
                 val replyMode=if(monologueTurn) 0 else settings.getInt("llm_reply",1)
                 val started=SystemClock.elapsedRealtime()
                 llmTiming="LLM処理中（$activeBackend）"
                 run {
-                    val reuse=ContextReuse.allowed(settings.getBoolean("reuse_context",false),monologueTurn,cachedValid,cachedHistory,memory.snapshot(),cachedMode,replyMode)
-                    val reuseReason=ContextReuse.reason(settings.getBoolean("reuse_context",false),monologueTurn,cachedValid,cachedHistory,memory.snapshot(),cachedMode,replyMode)
+                    val reuse=ContextReuse.allowed(e.supportsReuse && settings.getBoolean("reuse_context",false),monologueTurn,cachedValid,cachedHistory,memory.snapshot(),cachedMode,replyMode)
+                    val reuseReason=if(!e.supportsReuse) "GGUFのトークン一致判定（詳細は末尾）" else ContextReuse.reason(settings.getBoolean("reuse_context",false),monologueTurn,cachedValid,cachedHistory,memory.snapshot(),cachedMode,replyMode)
                     val c=if(reuse) cachedConversation!! else {
                         cachedConversation?.close();cachedConversation=null
-                        e.createConversation(ConversationConfig(systemInstruction=Contents.of(ReplyPolicy.prompt(replyMode)),initialMessages=previous,maxOutputToken=ReplyPolicy.profile(replyMode).tokens)).also { cachedConversation=it }
+                        e.session(ReplyPolicy.prompt(replyMode),previous,ReplyPolicy.profile(replyMode).tokens).also { cachedConversation=it }
                     }
                     cachedValid=false
                     val contextReady=SystemClock.elapsedRealtime()
@@ -550,11 +600,8 @@ class RobotService : Service() {
                         var firstBoundary=""
                         val rtf=TtsRtf()
                         var logId=0L
-                        c.sendMessageAsync(text,object:MessageCallback {
-                            override fun onMessage(message:com.google.ai.edge.litertlm.Message) { if(turn==epoch.get()) { val delta=message.toString();if(delta.isNotBlank())firstToken.compareAndSet(0,SystemClock.elapsedRealtime());stream.append(delta) } }
-                            override fun onDone() { generated.set(SystemClock.elapsedRealtime());stream.finish() }
-                            override fun onError(throwable:Throwable) { stream.fail(throwable) }
-                        })
+                        c.generate(text,onDelta={ delta -> if(turn==epoch.get()) { if(delta.isNotBlank())firstToken.compareAndSet(0,SystemClock.elapsedRealtime());stream.append(delta) } },
+                            onDone={generated.set(SystemClock.elapsedRealtime());stream.finish()},onError={stream.fail(it)})
                         try {
                             while(true) {
                                 checkTurn(turn)
@@ -576,12 +623,13 @@ class RobotService : Service() {
                         completed=true
                         cachedHistory=memory.snapshot()+ConversationMemory.Turn(text,answer)
                         cachedMode=replyMode
-                        cachedValid=!monologueTurn && settings.getBoolean("reuse_context",false)
+                        cachedValid=e.supportsReuse && !monologueTurn && settings.getBoolean("reuse_context",false)
                         val seconds=(generated.get()-started)/1000.0
                         val first=if(firstSent.get()>0) "${firstSent.get()-started}ms" else "なし"
-                        llmTiming=String.format(Locale.JAPAN,"全文生成：%.1f秒 / 出力%d文字 / 履歴%d往復 / $activeBackend\n最初の音声送信：%s\n生成と読み上げを並行。音声送信は実際の発音開始とは異なります。",seconds,answer.length,previous.size/2,first) +
+                        llmTiming=String.format(Locale.JAPAN,"全文生成：%.1f秒 / 出力%d文字 / 履歴%d往復 / $activeBackend\n最初の音声送信：%s\n生成と読み上げを並行。音声送信は実際の発音開始とは異なります。",seconds,answer.length,previous.size,first) +
                             "\n会話準備：${contextReady-started}ms / 履歴再利用：${if(reuse) "あり" else "なし"}\n再利用判定：$reuseReason\n最初の生成通知：${if(firstToken.get()>0) firstToken.get()-started else -1}ms / 最初の読み上げ用文章：${if(firstText.get()>0) firstText.get()-started else -1}ms\n生成通知から文章区切りまで：${if(firstText.get()>0 && firstToken.get()>0) firstText.get()-firstToken.get() else -1}ms"+
                             "\n$firstBoundary\n最初の区間の音声合成：${firstSynthesis.get()}ms\n$firstPrep\n${rtf.summary()}\n生成通知・文章・送信は会話コンテキスト作成前から計測。無音待ちとASRを除く。音声合成は単独の所要時間。"
+                        if(e is GgufLlm)llmTiming+="\n"+e.lastStats
                         Thread.sleep(250);checkTurn(turn) // Quiet tail only after the complete reply.
                         answer
                     } catch(e:Exception) { cachedValid=false;llmTiming="前回のLLM処理は中断または失敗しました";throw e }
@@ -789,7 +837,7 @@ class RobotService : Service() {
     }
     override fun onDestroy() {
         core2Volume=-1;volumeStatus="Core2未接続"
-        cancel(true); alive=false; connected=false; linkEpoch.incrementAndGet();transport?.close(); recorder?.let { runCatching { it.stop() } }
+        requestRelease(); alive=false; connected=false; linkEpoch.incrementAndGet();transport?.close(); recorder?.let { runCatching { it.stop() } }
         tts?.shutdown(); power.release(); wifi.release(); running=false; ready=false
         http.dispatcher.executorService.shutdown(); status="終了しました"
         super.onDestroy()

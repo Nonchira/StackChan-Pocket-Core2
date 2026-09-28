@@ -10,3 +10,24 @@ Core2はCore2_Sourceのplatformio.iniを使用します。固定のupload_port�
 
 
 APKはdebug署名版であり、一般向けストア配布用のrelease署名・ストア審査は別工程です。
+
+## 0.3.50以降：GGUFネイティブ依存
+
+Android_Sourceで作業します。JDK17・SDK35に加え、NDK `28.2.13676358`、CMake `3.22.1`をAndroid SDK Managerで用意してください。対象ABIはarm64-v8aです。
+
+```powershell
+git clone https://github.com/ggml-org/llama.cpp vendor/llama.cpp
+git -C vendor/llama.cpp checkout 81bc6b83f827df746eb129235488d325c49cae52
+./gradlew.bat :app:assembleDebug :app:testDebugUnitTest :app:lintDebug '-PpocketVulkanRoot='
+```
+
+上はCPU専用ビルドです。配布APKはCPUとVulkanを含みます。WindowsでVulkanもビルドする場合は次の手順を使います。パスは自分の環境に置き換えてください。
+
+```powershell
+./tools/setup-vulkan.ps1 -BuildRoot C:/android-deps/vulkan -SdkRoot C:/Android/Sdk
+./gradlew.bat :app:assembleDebug :app:testDebugUnitTest :app:lintDebug '-PpocketVulkanRoot=C:/android-deps/vulkan'
+```
+
+スクリプトは固定版のVulkan依存とホスト用コンパイラーを取得します。CPU/Vulkan切り替えは`pocketVulkanRoot`を明示してください。APK内の`lib/arm64-v8a/libggml-vulkan.so`でVulkan同梱を確認できます。依存ソース・SDK・署名秘密鍵はリポジトリに含めません。
+
+配布版と同じ鍵で更新するビルドでは`STACKCHAN_DEBUG_KEYSTORE`に鍵のパスを指定できます。鍵は公開しないでください。

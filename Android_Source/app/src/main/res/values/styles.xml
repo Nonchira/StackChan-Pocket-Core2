@@ -1,0 +1,46 @@
+<resources>
+    <style name="PocketTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#FFA448</item>
+        <item name="android:windowBackground">#1C1612</item>
+        <item name="android:colorBackground">#1C1612</item>
+        <item name="android:colorBackgroundFloating">#2B211A</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+    <style name="PocketThemeOrange" parent="PocketTheme">
+        <item name="android:colorAccent">#FFA448</item>
+        <item name="android:windowBackground">#1C1612</item>
+        <item name="android:colorBackground">#1C1612</item>
+        <item name="android:colorBackgroundFloating">#2B211A</item>
+    </style>
+    <style name="PocketThemeMint" parent="PocketTheme">
+        <item name="android:colorAccent">#A8E5CD</item>
+        <item name="android:windowBackground">#101817</item>
+        <item name="android:colorBackground">#101817</item>
+        <item name="android:colorBackgroundFloating">#1B2926</item>
+    </style>
+    <style name="PocketThemeBlue" parent="PocketTheme">
+        <item name="android:colorAccent">#91BDFF</item>
+        <item name="android:windowBackground">#141923</item>
+        <item name="android:colorBackground">#141923</item>
+        <item name="android:colorBackgroundFloating">#202B3B</item>
+    </style>
+    <style name="PocketThemeRose" parent="PocketTheme">
+        <item name="android:colorAccent">#FF625C</item>
+        <item name="android:windowBackground">#221313</item>
+        <item name="android:colorBackground">#221313</item>
+        <item name="android:colorBackgroundFloating">#352020</item>
+    </style>
+    <style name="PocketThemeClassic" parent="PocketTheme">
+        <item name="android:colorAccent">#7BC9C1</item>
+        <item name="android:windowBackground">#1B1C23</item>
+        <item name="android:colorBackground">#1B1C23</item>
+        <item name="android:colorBackgroundFloating">#20222A</item>
+    </style>
+    <style name="PocketThemeGray" parent="PocketTheme">
+        <item name="android:colorAccent">#C8C8C8</item>
+        <item name="android:windowBackground">#191919</item>
+        <item name="android:colorBackground">#191919</item>
+        <item name="android:colorBackgroundFloating">#262626</item>
+    </style>
+</resources>

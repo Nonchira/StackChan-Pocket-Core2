@@ -31,3 +31,10 @@ Core2 firmware is a separate MIT-licensed derivative of Corvelis/stackchan-pet-f
 現行のスマホ連携版Core2ファームには、[Corvelis/stackchan-pet-fw](https://github.com/Corvelis/stackchan-pet-fw)を基盤とした実装も使用しています。上記の開発経緯と、現行コードの由来の両方を記載しています。
 
 原作者および各ライブラリの開発者の皆さまに感謝します。本版は独自の派生開発であり、各原作者の公式配布版ではありません。既存の著作権表示・LICENSE・第三者ライセンス表記を維持します。
+
+## GGUF backend
+
+- llama.cpp: commit `81bc6b83f827df746eb129235488d325c49cae52`, MIT, https://github.com/ggml-org/llama.cpp
+- cpp-httplib: MIT; nlohmann/json: MIT. License texts retained in APK assets/licenses.
+- Vulkan-Headers, Vulkan-Hpp, SPIRV-Headers: their upstream license texts are retained in assets/licenses subdirectories. Dependency revisions are pinned in tools/setup-vulkan.ps1.
+- The Vulkan backend is optional at build time. AI model weights are not bundled and retain their own terms.
